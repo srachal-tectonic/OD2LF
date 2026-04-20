@@ -29,9 +29,11 @@ jobs:
         run: npm ci --omit=dev
 
       - name: Smoke-test app loads
+        # NODE_ENV=production skips the dotenv require (a devDependency);
+        # dummy env vars satisfy config.js's required-vars check.
         run: node -e "require('./src/config'); console.log('config OK')"
         env:
-          # dummy values so config.js passes its required-vars check
+          NODE_ENV: production
           MS_TENANT_ID: x
           MS_CLIENT_ID: x
           MS_CLIENT_SECRET: x
