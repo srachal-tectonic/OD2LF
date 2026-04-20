@@ -1,0 +1,30 @@
+{
+  "name": "od2lf-sharepoint-laserfiche-bridge",
+  "version": "1.0.0",
+  "description": "SharePoint webhook listener that detects new folders and uploads files to Laserfiche",
+  "main": "src/server.js",
+  "engines": {
+    "node": "20.x",
+    "npm": "10.x"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "renew-webhooks": "node src/scripts/renew-webhooks.js",
+    "setup-subscription": "node src/scripts/setup-subscription.js",
+    "upload-folder": "node src/scripts/upload-folder.js"
+  },
+  "dependencies": {
+    "axios": "^1.7.0",
+    "compression": "^1.7.4",
+    "express": "^4.21.0",
+    "form-data": "^4.0.0",
+    "helmet": "^8.0.0",
+    "ngrok": "^5.0.0-beta.2",
+    "node-cron": "^3.0.3",
+    "winston": "^3.14.0"
+  },
+  "devDependencies": {
+    "dotenv": "^16.4.0"
+  }
+}

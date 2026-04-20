@@ -1,0 +1,69 @@
+name: Deploy to Azure Web App
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  AZURE_WEBAPP_NAME: od2lf                   # <-- change to your App Service name
+  NODE_VERSION: '20.x'
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+      url: ${{ steps.deploy.outputs.webapp-url }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Use Node.js ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install production dependencies
+        run: npm ci --omit=dev
+
+      - name: Smoke-test app loads
+        run: node -e "require('./src/config'); console.log('config OK')"
+        env:
+          # dummy values so config.js passes its required-vars check
+          MS_TENANT_ID: x
+          MS_CLIENT_ID: x
+          MS_CLIENT_SECRET: x
+          SHAREPOINT_SITE_ID: x
+          SHAREPOINT_TARGET_FOLDER_PATH: x
+          WEBHOOK_CLIENT_STATE: x
+          LF_SERVER_URL: x
+          LF_REPO_NAME: x
+          LF_USERNAME: x
+          LF_PASSWORD: x
+
+      - name: Package artifact
+        run: zip -r app.zip . -x '*.git*' 'node_modules/.cache/*' '*.env*' 'OD2LF.rar' 'test.js'
+
+      - name: Deploy to Azure Web App
+        id: deploy
+        uses: azure/webapps-deploy@v3
+        with:
+          app-name: ${{ env.AZURE_WEBAPP_NAME }}
+          publish-profile: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
+          package: app.zip
+
+      - name: Verify health after deploy
+        run: |
+          sleep 20
+          for i in 1 2 3 4 5; do
+            if curl -fsS "${{ steps.deploy.outputs.webapp-url }}/health" > health.json; then
+              cat health.json
+              exit 0
+            fi
+            echo "Health check attempt $i failed, retrying..."
+            sleep 10
+          done
+          echo "Health check never succeeded"
+          exit 1
