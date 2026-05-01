@@ -325,10 +325,15 @@ async function getNewFoldersInTarget() {
 
 async function getFolderContents(folderId) {
   const client = graphClient();
-  const response = await client.get(
-    `${GRAPH_BASE}/sites/${SITE_ID}/drive/items/${folderId}/children`
-  );
-  return response.data.value || [];
+  const all = [];
+  let url = `${GRAPH_BASE}/sites/${SITE_ID}/drive/items/${folderId}/children`;
+  while (url) {
+    const response = await client.get(url);
+    const data = response.data;
+    all.push(...(data.value || []));
+    url = data['@odata.nextLink'] || null;
+  }
+  return all;
 }
 
 async function downloadFile(itemId) {
