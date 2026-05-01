@@ -162,23 +162,48 @@ function setSubscriptionId(id) {
 
 // ── Delta Query ──────────────────────────────────────────────
 
+// Cache the target folder's drive-item id so we can scope delta queries to
+// that subtree instead of the whole drive (saves Graph traffic + log noise).
+let targetFolderId = null;
+
+async function resolveTargetFolderId() {
+  if (targetFolderId) return targetFolderId;
+  const client = graphClient();
+  const targetPath = config.microsoft.targetFolderPath;
+  const encodedPath = targetPath
+    .split('/')
+    .filter(Boolean)
+    .map(encodeURIComponent)
+    .join('/');
+  const url = `${GRAPH_BASE}/sites/${SITE_ID}/drive/root:/${encodedPath}`;
+  const response = await client.get(url);
+  targetFolderId = response.data.id;
+  logger.info('Resolved target folder id', { targetPath, targetFolderId });
+  return targetFolderId;
+}
+
+async function deltaBaseUrl() {
+  const id = await resolveTargetFolderId();
+  return `${GRAPH_BASE}/sites/${SITE_ID}/drive/items/${id}/delta`;
+}
+
 async function initializeDeltaToken() {
   const client = graphClient();
-  const response = await client.get(
-    `${GRAPH_BASE}/sites/${SITE_ID}/drive/root/delta?token=latest`
-  );
+  const baseUrl = await deltaBaseUrl();
+  const response = await client.get(`${baseUrl}?token=latest`);
 
   const deltaLink = response.data['@odata.deltaLink'];
   if (deltaLink) {
     deltaToken = new URL(deltaLink).searchParams.get('token');
-    logger.info('Delta token initialized');
+    logger.info('Delta token initialized (scoped to target folder)');
   }
 }
 
 async function getChangedItems() {
   const client = graphClient();
+  const baseUrl = await deltaBaseUrl();
 
-  let url = `${GRAPH_BASE}/sites/${SITE_ID}/drive/root/delta`;
+  let url = baseUrl;
   if (deltaToken) {
     url += `?token=${encodeURIComponent(deltaToken)}`;
   }
