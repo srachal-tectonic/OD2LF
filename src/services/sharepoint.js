@@ -204,6 +204,21 @@ async function getChangedItems() {
   return allChanges;
 }
 
+// Returns the path segments below the configured target folder, or null
+// if the parent is outside the target subtree.
+//   parent === target               → []
+//   parent === target/A             → ['A']
+//   parent === target/A/B           → ['A', 'B']
+function relativeSegmentsFromTarget(parentPath) {
+  if (!parentPath) return null;
+  const targetPath = config.microsoft.targetFolderPath;
+  if (parentPath.endsWith(targetPath)) return [];
+  const marker = `${targetPath}/`;
+  const idx = parentPath.indexOf(marker);
+  if (idx === -1) return null;
+  return parentPath.slice(idx + marker.length).split('/').filter(Boolean);
+}
+
 async function getNewItemsInTarget() {
   const allChanges = await getChangedItems();
   const targetPath = config.microsoft.targetFolderPath;
@@ -227,21 +242,21 @@ async function getNewItemsInTarget() {
     return isFolder && isNotDeleted && isInTarget;
   });
 
+  // Files: match anywhere within the target subtree, not just direct children.
+  // Files dropped via folder upload arrive in the delta after the folder event,
+  // with parentPath ending in <subfolder>, not the target itself.
   // Deduplicate by item id — Graph delta often returns the same file multiple
-  // times (e.g. .docx triggers create + metadata update + indexing events)
+  // times (e.g. .docx triggers create + metadata update + indexing events).
   const seenFileIds = new Set();
-  const newFiles = allChanges.filter((item) => {
-    const isFile = item.file !== undefined;
-    const isNotDeleted = item.deleted === undefined;
-    const parentPath = item.parentReference?.path || '';
-    const isInTarget = parentPath.endsWith(targetPath);
-    if (isFile && isNotDeleted && isInTarget) {
-      if (seenFileIds.has(item.id)) return false;
-      seenFileIds.add(item.id);
-      return true;
-    }
-    return false;
-  });
+  const newFiles = [];
+  for (const item of allChanges) {
+    if (item.file === undefined || item.deleted !== undefined) continue;
+    const segments = relativeSegmentsFromTarget(item.parentReference?.path);
+    if (segments === null) continue;
+    if (seenFileIds.has(item.id)) continue;
+    seenFileIds.add(item.id);
+    newFiles.push({ ...item, relativeSegments: segments });
+  }
 
   if (newFolders.length > 0 || newFiles.length > 0) {
     logger.info('Delta query found new items in target', {

@@ -21,60 +21,40 @@ async function processNewItems() {
     return { foldersProcessed: 0, filesProcessed: 0 };
   }
 
-  // ── Process new folders (existing behaviour) ────────────────
+  // Cache LF folder ids per relative path within this pass so we don't
+  // re-list the same parent for every file in the same subfolder.
+  const folderCache = new Map();
+  folderCache.set('', config.laserfiche.destinationFolderId);
+
+  async function ensureLfFolderPath(segments) {
+    let parentId = config.laserfiche.destinationFolderId;
+    let key = '';
+    for (const seg of segments) {
+      key = key ? `${key}/${seg}` : seg;
+      let id = folderCache.get(key);
+      if (!id) {
+        const lfFolder = await laserfiche.findOrCreateFolder(parentId, seg);
+        id = lfFolder.id;
+        folderCache.set(key, id);
+      }
+      parentId = id;
+    }
+    return parentId;
+  }
+
+  // ── Eagerly create direct-child folders ─────────────────────
+  // Files arriving in subsequent delta pages will populate these via the
+  // file loop below. Creating eagerly keeps empty folders visible in LF.
   for (const folder of newFolders) {
     try {
       logger.info('Processing new folder', {
         folderName: folder.name,
         folderId: folder.id,
       });
-
-      // Create matching folder in Laserfiche
-      const lfFolder = await laserfiche.findOrCreateFolder(
-        config.laserfiche.destinationFolderId,
-        folder.name
-      );
-
-      // Get all files in the SharePoint folder
-      const contents = await sharepoint.getFolderContents(folder.id);
-      const files = contents.filter((item) => item.file !== undefined);
-
-      logger.info('Found files in folder', {
-        folderName: folder.name,
-        fileCount: files.length,
-      });
-
-      for (const file of files) {
-        try {
-          const downloaded = await sharepoint.downloadFile(file.id);
-
-          await laserfiche.uploadDocument(
-            lfFolder.id,
-            downloaded.name,
-            downloaded.content,
-            downloaded.mimeType
-          );
-
-          logger.info('File transferred successfully', {
-            fileName: downloaded.name,
-            size: downloaded.size,
-          });
-        } catch (fileErr) {
-          logger.error('Failed to transfer file', {
-            fileName: file.name,
-            folderId: folder.id,
-            error: fileErr.message,
-          });
-        }
-      }
-
+      await ensureLfFolderPath([folder.name]);
       foldersProcessed++;
-      logger.info('Folder processing complete', {
-        folderName: folder.name,
-        filesProcessed: files.length,
-      });
     } catch (folderErr) {
-      logger.error('Failed to process folder', {
+      logger.error('Failed to create folder in Laserfiche', {
         folderName: folder.name,
         folderId: folder.id,
         error: folderErr.message,
@@ -84,18 +64,22 @@ async function processNewItems() {
     }
   }
 
-  // ── Process new files directly in target folder ─────────────
+  // ── Process new files anywhere under the target ─────────────
   for (const file of newFiles) {
+    const segments = file.relativeSegments || [];
+    const relativePath = segments.join('/') || '(target root)';
     try {
-      logger.info('Processing new file in target folder', {
+      logger.info('Processing new file', {
         fileName: file.name,
         fileId: file.id,
+        relativePath,
       });
 
+      const targetFolderId = await ensureLfFolderPath(segments);
       const downloaded = await sharepoint.downloadFile(file.id);
 
       await laserfiche.uploadDocument(
-        config.laserfiche.destinationFolderId,
+        targetFolderId,
         downloaded.name,
         downloaded.content,
         downloaded.mimeType
@@ -105,11 +89,13 @@ async function processNewItems() {
       logger.info('File transferred successfully', {
         fileName: downloaded.name,
         size: downloaded.size,
+        relativePath,
       });
     } catch (fileErr) {
-      logger.error('Failed to transfer file from target folder', {
+      logger.error('Failed to transfer file', {
         fileName: file.name,
         fileId: file.id,
+        relativePath,
         error: fileErr.message,
       });
     }
