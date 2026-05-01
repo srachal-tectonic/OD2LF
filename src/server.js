@@ -55,6 +55,38 @@ app.get('/api/subscriptions', async (req, res) => {
 let debounceTimer = null;
 const DEBOUNCE_MS = 5000; // wait 5 seconds after last notification before processing
 
+// Serialize bridge runs. If a notification arrives while a pass is in-flight,
+// queue exactly one follow-up pass to drain anything that arrived during it.
+// Prevents overlapping LF folder lookups/creates from racing into 409s.
+let bridgeRunning = false;
+let bridgeRunPending = false;
+
+async function runBridge() {
+  if (bridgeRunning) {
+    bridgeRunPending = true;
+    return;
+  }
+  bridgeRunning = true;
+  try {
+    const result = await bridge.processNewItems();
+    if (result.foldersProcessed > 0 || result.filesProcessed > 0
+        || result.foldersFailed > 0 || result.filesFailed > 0) {
+      logger.info('Webhook processing complete', result);
+    }
+  } catch (err) {
+    logger.error('Error processing webhook notification', {
+      error: err.message,
+      stack: err.stack,
+    });
+  } finally {
+    bridgeRunning = false;
+    if (bridgeRunPending) {
+      bridgeRunPending = false;
+      runBridge();
+    }
+  }
+}
+
 app.post('/api/webhook', async (req, res) => {
   // Validation handshake: SharePoint/Graph sends validationToken on subscription creation
   if (req.query.validationToken) {
@@ -84,20 +116,10 @@ app.post('/api/webhook', async (req, res) => {
 
   // Debounce: reset timer on each notification, only process once things settle
   if (debounceTimer) clearTimeout(debounceTimer);
-  debounceTimer = setTimeout(async () => {
+  debounceTimer = setTimeout(() => {
     debounceTimer = null;
-    try {
-      logger.debug('Processing debounced webhook notification');
-      const { foldersProcessed, filesProcessed } = await bridge.processNewItems();
-      if (foldersProcessed > 0 || filesProcessed > 0) {
-        logger.info('Webhook processing complete', { foldersProcessed, filesProcessed });
-      }
-    } catch (err) {
-      logger.error('Error processing webhook notification', {
-        error: err.message,
-        stack: err.stack,
-      });
-    }
+    logger.debug('Processing debounced webhook notification');
+    runBridge();
   }, DEBOUNCE_MS);
 });
 

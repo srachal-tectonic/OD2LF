@@ -14,12 +14,19 @@ async function processNewItems() {
   const { newFolders, newFiles } = await sharepoint.getNewItemsInTarget();
 
   let foldersProcessed = 0;
+  let foldersFailed = 0;
   let filesProcessed = 0;
+  let filesFailed = 0;
 
   if (newFolders.length === 0 && newFiles.length === 0) {
     logger.debug('No new folders or files in target path, skipping');
-    return { foldersProcessed: 0, filesProcessed: 0 };
+    return { foldersProcessed: 0, foldersFailed: 0, filesProcessed: 0, filesFailed: 0 };
   }
+
+  logger.info('Bridge processing pass starting', {
+    newFolders: newFolders.length,
+    newFiles: newFiles.length,
+  });
 
   // Cache LF folder ids per relative path within this pass so we don't
   // re-list the same parent for every file in the same subfolder.
@@ -54,6 +61,7 @@ async function processNewItems() {
       await ensureLfFolderPath([folder.name]);
       foldersProcessed++;
     } catch (folderErr) {
+      foldersFailed++;
       logger.error('Failed to create folder in Laserfiche', {
         folderName: folder.name,
         folderId: folder.id,
@@ -92,17 +100,26 @@ async function processNewItems() {
         relativePath,
       });
     } catch (fileErr) {
+      filesFailed++;
       logger.error('Failed to transfer file', {
         fileName: file.name,
         fileId: file.id,
         relativePath,
         error: fileErr.message,
+        status: fileErr.response?.status,
+        responseBody: fileErr.response?.data,
       });
     }
   }
 
-  logger.info('Bridge processing complete', { foldersProcessed, filesProcessed });
-  return { foldersProcessed, filesProcessed };
+  logger.info('Bridge processing complete', {
+    foldersProcessed,
+    foldersFailed,
+    filesProcessed,
+    filesFailed,
+    totalSeen: newFolders.length + newFiles.length,
+  });
+  return { foldersProcessed, foldersFailed, filesProcessed, filesFailed };
 }
 
 // Keep backward-compatible export
