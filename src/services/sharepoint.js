@@ -162,46 +162,28 @@ function setSubscriptionId(id) {
 
 // ── Delta Query ──────────────────────────────────────────────
 
-// Cache the target folder's drive-item id so we can scope delta queries to
-// that subtree instead of the whole drive (saves Graph traffic + log noise).
-let targetFolderId = null;
-
-async function resolveTargetFolderId() {
-  if (targetFolderId) return targetFolderId;
-  const client = graphClient();
-  const targetPath = config.microsoft.targetFolderPath;
-  const encodedPath = targetPath
-    .split('/')
-    .filter(Boolean)
-    .map(encodeURIComponent)
-    .join('/');
-  const url = `${GRAPH_BASE}/sites/${SITE_ID}/drive/root:/${encodedPath}`;
-  const response = await client.get(url);
-  targetFolderId = response.data.id;
-  logger.info('Resolved target folder id', { targetPath, targetFolderId });
-  return targetFolderId;
-}
-
-async function deltaBaseUrl() {
-  const id = await resolveTargetFolderId();
-  return `${GRAPH_BASE}/sites/${SITE_ID}/drive/items/${id}/delta`;
-}
+// Drive-root delta is used (not folder-scoped) because folder-scoped delta on
+// SharePoint document libraries has known instability — tokens can be
+// invalidated by background indexing and return 410 Gone even when nothing in
+// the scoped folder has changed. Drive-root delta is reliable; the cost is
+// receiving events for items outside the target, which we filter out below.
 
 async function initializeDeltaToken() {
   const client = graphClient();
-  const baseUrl = await deltaBaseUrl();
-  const response = await client.get(`${baseUrl}?token=latest`);
+  const response = await client.get(
+    `${GRAPH_BASE}/sites/${SITE_ID}/drive/root/delta?token=latest`
+  );
 
   const deltaLink = response.data['@odata.deltaLink'];
   if (deltaLink) {
     deltaToken = new URL(deltaLink).searchParams.get('token');
-    logger.info('Delta token initialized (scoped to target folder)');
+    logger.info('Delta token initialized');
   }
 }
 
 async function getChangedItems() {
   const client = graphClient();
-  const baseUrl = await deltaBaseUrl();
+  const baseUrl = `${GRAPH_BASE}/sites/${SITE_ID}/drive/root/delta`;
 
   let url = baseUrl;
   if (deltaToken) {
@@ -211,9 +193,32 @@ async function getChangedItems() {
   const allChanges = [];
 
   while (url) {
-    const response = await client.get(url);
-    const data = response.data;
+    let response;
+    try {
+      response = await client.get(url);
+    } catch (err) {
+      // 410 Gone: delta token has been invalidated by SharePoint. Reset and
+      // re-prime so the next webhook starts from a fresh state. Changes that
+      // occurred during the gap will be missed by delta but typically arrive
+      // again as their own webhooks (e.g. ongoing uploads).
+      if (err.response?.status === 410) {
+        logger.warn('Delta returned 410 Gone; resetting token and re-priming', {
+          hadToken: !!deltaToken,
+        });
+        deltaToken = null;
+        try {
+          await initializeDeltaToken();
+        } catch (initErr) {
+          logger.error('Failed to re-initialize delta token after 410', {
+            error: initErr.message,
+          });
+        }
+        return [];
+      }
+      throw err;
+    }
 
+    const data = response.data;
     allChanges.push(...(data.value || []));
 
     if (data['@odata.nextLink']) {
@@ -248,14 +253,25 @@ async function getNewItemsInTarget() {
   const allChanges = await getChangedItems();
   const targetPath = config.microsoft.targetFolderPath;
 
-  // Log all changes so we can see the actual parentReference.path format
+  // Only log items inside the target subtree so debug output isn't drowned
+  // out by activity elsewhere on the drive.
+  let inTargetCount = 0;
   for (const item of allChanges) {
-    logger.debug('Delta item', {
+    const segments = relativeSegmentsFromTarget(item.parentReference?.path);
+    if (segments === null) continue;
+    inTargetCount++;
+    logger.debug('Delta item in target', {
       name: item.name,
       isFolder: item.folder !== undefined,
       isFile: item.file !== undefined,
       deleted: item.deleted !== undefined,
-      parentPath: item.parentReference?.path,
+      relativePath: segments.join('/') || '(target root)',
+    });
+  }
+  if (allChanges.length > 0) {
+    logger.debug('Delta query summary', {
+      totalChanges: allChanges.length,
+      inTarget: inTargetCount,
     });
   }
 
