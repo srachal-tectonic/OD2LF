@@ -2,6 +2,7 @@ const sharepoint = require('./sharepoint');
 const laserfiche = require('./laserfiche');
 const config = require('../config');
 const logger = require('../logger');
+const { summarizeBody } = require('../logger');
 
 /**
  * Main bridge logic: detect new folders and files in the SharePoint target folder,
@@ -21,7 +22,7 @@ const logger = require('../logger');
 
 const uploadedFileIds = new Set();
 
-async function collectFilesRecursive(spFolderId, baseSegments, accumMap) {
+async function collectFilesRecursive(spFolderId, baseSegments, accumMap, folderSegmentsList) {
   const items = await sharepoint.getFolderContents(spFolderId);
   for (const item of items) {
     if (item.file !== undefined) {
@@ -29,11 +30,12 @@ async function collectFilesRecursive(spFolderId, baseSegments, accumMap) {
         accumMap.set(item.id, { file: item, segments: baseSegments });
       }
     } else if (item.folder !== undefined) {
-      await collectFilesRecursive(
-        item.id,
-        [...baseSegments, item.name],
-        accumMap
-      );
+      const childSegments = [...baseSegments, item.name];
+      // Record the subfolder so we can ensure it in LF even when it (or its
+      // entire subtree) contains no files. Without this, empty subfolders
+      // never have their path walked by an upload and so never get created.
+      folderSegmentsList.push(childSegments);
+      await collectFilesRecursive(item.id, childSegments, accumMap, folderSegmentsList);
     }
   }
 }
@@ -84,6 +86,13 @@ async function processNewItems() {
     filesToProcess.set(f.id, { file: f, segments: f.relativeSegments || [] });
   }
 
+  // Subfolders discovered during recursive enumeration (so we can ensure
+  // empty ones in LF; folders with files would otherwise be created as a
+  // side-effect of the file-upload path-walk).
+  const enumeratedFolderSegments = [];
+  let subfoldersEnsured = 0;
+  let subfoldersFailed = 0;
+
   // ── Process new folders + recursively enumerate their contents ──
   for (const folder of newFolders) {
     try {
@@ -96,13 +105,21 @@ async function processNewItems() {
 
       // Enumerate existing contents — required to catch MOVED folders whose
       // children don't generate individual delta events.
-      const before = filesToProcess.size;
-      await collectFilesRecursive(folder.id, [folder.name], filesToProcess);
-      const added = filesToProcess.size - before;
-      if (added > 0) {
+      const filesBefore = filesToProcess.size;
+      const foldersBefore = enumeratedFolderSegments.length;
+      await collectFilesRecursive(
+        folder.id,
+        [folder.name],
+        filesToProcess,
+        enumeratedFolderSegments
+      );
+      const filesAdded = filesToProcess.size - filesBefore;
+      const foldersAdded = enumeratedFolderSegments.length - foldersBefore;
+      if (filesAdded > 0 || foldersAdded > 0) {
         logger.info('Enumerated existing contents of new folder', {
           folderName: folder.name,
-          filesFound: added,
+          filesFound: filesAdded,
+          subfoldersFound: foldersAdded,
         });
       }
     } catch (folderErr) {
@@ -112,7 +129,26 @@ async function processNewItems() {
         folderId: folder.id,
         error: folderErr.message,
         status: folderErr.response?.status,
-        responseBody: folderErr.response?.data,
+        responseBody: summarizeBody(folderErr.response?.data),
+      });
+    }
+  }
+
+  // ── Ensure every enumerated subfolder exists in LF ──────────
+  // Idempotent: ensureLfFolderPath caches results within this pass and
+  // findOrCreateFolder handles existing folders without duplicating them.
+  for (const segments of enumeratedFolderSegments) {
+    const relativePath = segments.join('/');
+    try {
+      await ensureLfFolderPath(segments);
+      subfoldersEnsured++;
+    } catch (subErr) {
+      subfoldersFailed++;
+      logger.error('Failed to ensure subfolder in Laserfiche', {
+        relativePath,
+        error: subErr.message,
+        status: subErr.response?.status,
+        responseBody: summarizeBody(subErr.response?.data),
       });
     }
   }
@@ -163,7 +199,7 @@ async function processNewItems() {
         relativePath,
         error: fileErr.message,
         status: fileErr.response?.status,
-        responseBody: fileErr.response?.data,
+        responseBody: summarizeBody(fileErr.response?.data),
       });
     }
   }
@@ -171,6 +207,8 @@ async function processNewItems() {
   logger.info('Bridge processing complete', {
     foldersProcessed,
     foldersFailed,
+    subfoldersEnsured,
+    subfoldersFailed,
     filesProcessed,
     filesFailed,
     filesSkipped,

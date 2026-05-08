@@ -3,6 +3,7 @@ const https = require('https');
 const FormData = require('form-data');
 const config = require('../config');
 const logger = require('../logger');
+const { summarizeBody } = require('../logger');
 
 let token = null;
 let tokenExpiry = 0;
@@ -84,7 +85,7 @@ async function createFolder(parentId, folderName) {
       parentId,
       folderName,
       status: err.response?.status,
-      body: err.response?.data,
+      body: summarizeBody(err.response?.data),
     });
     throw err;
   }
@@ -178,6 +179,9 @@ async function findOrCreateFolder(parentId, folderName) {
 async function uploadDocument(parentFolderId, fileName, fileBuffer, mimeType) {
   await ensureAuthenticated();
 
+  const sizeBytes = fileBuffer.length;
+  const sizeMB = +(sizeBytes / 1024 / 1024).toFixed(2);
+
   const form = new FormData();
   form.append('electronicDocument', fileBuffer, {
     filename: fileName,
@@ -199,17 +203,32 @@ async function uploadDocument(parentFolderId, fileName, fileBuffer, mimeType) {
     logger.info('Document uploaded to Laserfiche', {
       fileName,
       parentFolderId,
+      sizeMB,
       entryId: response.data.id,
     });
 
     return response.data;
   } catch (err) {
-    logger.error('Laserfiche document upload failed', {
-      fileName,
-      parentFolderId,
-      status: err.response?.status,
-      body: err.response?.data,
-    });
+    const status = err.response?.status;
+    if (status === 413) {
+      // IIS in front of LF rejected the upload before LF saw it. Fix is to
+      // raise maxAllowedContentLength in the LF API site's web.config; not
+      // recoverable from the client.
+      logger.error('Upload rejected by IIS as too large (413)', {
+        fileName,
+        parentFolderId,
+        sizeMB,
+        hint: 'Increase IIS maxAllowedContentLength in the LF API web.config',
+      });
+    } else {
+      logger.error('Laserfiche document upload failed', {
+        fileName,
+        parentFolderId,
+        sizeMB,
+        status,
+        body: summarizeBody(err.response?.data),
+      });
+    }
     throw err;
   }
 }
